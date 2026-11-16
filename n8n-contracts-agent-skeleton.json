@@ -1,5 +1,5 @@
 {
-  "name": "Contracts & Projects AI Agent (Postgres + Chroma)",
+  "name": "Pure n8n Contracts Router (Postgres + Chroma)",
   "nodes": [
     {
       "parameters": {},
@@ -7,151 +7,184 @@
       "name": "When chat message received",
       "type": "@n8n/n8n-nodes-langchain.chatTrigger",
       "typeVersion": 1.1,
-      "position": [240, 300]
+      "position": [160, 400]
     },
     {
       "parameters": {
-        "model": "={{ $json.model || '/genai/Llama-4-Scout-17B' }}",
+        "model": "={{ $env.ROUTER_MODEL || '/genai/Llama-4-Scout-17B' }}",
         "options": {
-          "baseURL": "={{ $env.LLM_BASE_URL || 'https://your-inhouse-llm.example.com/v1' }}",
-          "apiKey": "={{ $env.LLM_API_KEY || 'your-api-key' }}"
+          "baseURL": "={{ $env.LLM_BASE_URL }}",
+          "temperature": 0
+        },
+        "messages": {
+          "messageValues": [
+            {
+              "role": "system",
+              "content": "Classify the user question into exactly one route. Return ONLY valid JSON: {\"route\":\"sql_only|sql_and_docs|docs_only|reference_docs|llm_only\"}.\n\nsql_only: structured lookups (project name/ID, dates, counts, lists, federal filters, latest mods, opportunities).\nsql_and_docs: needs both metadata filter AND document content (specific project + summarize, or date-range + SOW content).\ndocs_only: broad semantic / past-performance / capability / SOW similarity search.\nreference_docs: how-to, policy, procedure, Salesforce guidance.\nllm_only: general knowledge or greetings."
+            },
+            {
+              "role": "user",
+              "content": "={{ $json.chatInput || $json.question }}"
+            }
+          ]
         }
       },
-      "id": "openai-chat-model",
-      "name": "In-House LLM",
+      "id": "router-llm",
+      "name": "Route Classifier",
       "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
-      "typeVersion": 1,
-      "position": [460, 480],
+      "typeVersion": 1.2,
+      "position": [380, 400],
       "credentials": {
         "openAiApi": {
-          "id": "placeholder",
-          "name": "In-House OpenAI Compatible"
+          "id": "inhouse-llm",
+          "name": "In-House LLM"
         }
       }
     },
     {
       "parameters": {
+        "jsCode": "const text = $input.first().json.message?.content || $input.first().json.text || '{}';\nlet route = 'docs_only';\ntry {\n  const parsed = JSON.parse(text.match(/\\{.*\\}/s)?.[0] || text);\n  route = parsed.route || route;\n} catch (e) {}\nreturn [{ json: { route, question: $('When chat message received').first().json.chatInput } }];"
+      },
+      "id": "parse-route",
+      "name": "Parse Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 400]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "string": [{ "value1": "={{ $json.route }}", "operation": "equal", "value2": "sql_only" }] } },
+            { "conditions": { "string": [{ "value1": "={{ $json.route }}", "operation": "equal", "value2": "sql_and_docs" }] } },
+            { "conditions": { "string": [{ "value1": "={{ $json.route }}", "operation": "equal", "value2": "docs_only" }] } },
+            { "conditions": { "string": [{ "value1": "={{ $json.route }}", "operation": "equal", "value2": "reference_docs" }] } }
+          ]
+        },
+        "fallbackOutput": "extra"
+      },
+      "id": "switch",
+      "name": "Route Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [820, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \"Project\", \"Project_ID__c\", \"Contract_Name\", \"name\", \"Title\", \"link\", \"LinkFilename\", \"Modified\", \"lastModifiedDateTime\"\nFROM contracts_dataset_meta_prepared\nWHERE \"Project\" ILIKE '%' || $1 || '%'\n   OR \"Contract_Name\" ILIKE '%' || $1 || '%'\n   OR \"Project_ID__c\" ILIKE '%' || $1 || '%'\nORDER BY \"Modified\" DESC NULLS LAST\nLIMIT 20;",
         "options": {
-          "systemMessage": "You are a contracts and past-performance research assistant for I&S.\n\nYou have two tools:\n1. postgres_lookup – Use for structured questions (project name/ID known, date ranges, federal/IT filters, latest mods, file links).\n2. chroma_search – Use for semantic / description-based questions (opportunity text, similar SOWs, past performance matching).\n\nStrategy:\n- If the user names a specific project → start with postgres_lookup.\n- If the user gives a description or asks for similar contracts → start with chroma_search, then enrich with postgres_lookup using project IDs from results.\n- Always return relevant file links (SOW, PWS, modifications) when available.\n- Be precise, cite project names and dates, and prefer recent contracts (last 3–5 years) unless asked otherwise.\n- If results are weak, say so clearly."
+          "queryReplacement": "={{ $json.question }}"
         }
       },
-      "id": "ai-agent",
-      "name": "AI Agent",
-      "type": "@n8n/n8n-nodes-langchain.agent",
-      "typeVersion": 1.7,
-      "position": [680, 300]
+      "id": "postgres-sql",
+      "name": "Postgres Lookup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1040, 180],
+      "credentials": {
+        "postgres": { "id": "pg", "name": "Contracts DB" }
+      }
     },
     {
       "parameters": {
-        "description": "Query the Postgres contracts and file metadata tables. Use for project lookups, date-filtered contracts, federal/IT integration filters, latest modifications, and retrieving document links.",
-        "jsCode": "// Tool implementation placeholder – replace with Postgres node or Code node that runs SQL\n// Expected input: { query: string, filters?: object }\n// Return rows from contracts_dataset_meta_prepared or related tables\nreturn [{ json: { message: 'Postgres tool placeholder – wire to actual Postgres node' } }];"
-      },
-      "id": "postgres-tool",
-      "name": "postgres_lookup",
-      "type": "@n8n/n8n-nodes-langchain.toolCode",
-      "typeVersion": 1,
-      "position": [900, 180]
-    },
-    {
-      "parameters": {
-        "description": "Semantic search over contract documents in Chroma collection IS_contracts_full_main_e5_documents. Use for description-based or past-performance similarity queries.",
-        "url": "={{ $env.CHROMA_URL || 'https://10.73.89.168:9000' }}/api/v1/collections/IS_contracts_full_main_e5_documents/query",
         "method": "POST",
+        "url": "={{ $env.CHROMA_URL }}/api/v1/collections/IS_contracts_full_main_e5_documents/query",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "={{ $env.CHROMA_AUTH_TOKEN || 'Bearer your-token' }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
+            { "name": "Authorization", "value": "={{ $env.CHROMA_AUTH_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
           ]
         },
         "sendBody": true,
-        "bodyParameters": {
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query_texts\": [\"{{ $json.question }}\"],\n  \"n_results\": 10\n}"
+      },
+      "id": "chroma-docs",
+      "name": "Chroma Docs Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1040, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CHROMA_URL }}/api/v1/collections/IS_reference_main_e5/query",
+        "sendHeaders": true,
+        "headerParameters": {
           "parameters": [
-            {
-              "name": "query_texts",
-              "value": "={{ [$json.query || $json.input || ''] }}"
-            },
-            {
-              "name": "n_results",
-              "value": "={{ $json.n_results || 10 }}"
-            }
+            { "name": "Authorization", "value": "={{ $env.CHROMA_AUTH_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
           ]
         },
-        "options": {}
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query_texts\": [\"{{ $json.question }}\"],\n  \"n_results\": 8\n}"
       },
-      "id": "chroma-tool",
-      "name": "chroma_search",
-      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
-      "typeVersion": 1,
-      "position": [900, 420]
+      "id": "chroma-ref",
+      "name": "Chroma Reference Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1040, 620]
+    },
+    {
+      "parameters": {
+        "model": "={{ $env.ANSWER_MODEL || $env.ROUTER_MODEL }}",
+        "options": { "baseURL": "={{ $env.LLM_BASE_URL }}", "temperature": 0.2 },
+        "messages": {
+          "messageValues": [
+            {
+              "role": "system",
+              "content": "Answer the user's question using ONLY the retrieved context below. Keep it to 4 sentences or fewer. Always include relevant file links when present. If no relevant context, say so clearly."
+            },
+            {
+              "role": "user",
+              "content": "Question: {{ $('When chat message received').first().json.chatInput }}\n\nContext:\n{{ JSON.stringify($input.all()) }}"
+            }
+          ]
+        }
+      },
+      "id": "answer-llm",
+      "name": "Generate Answer",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [1280, 400],
+      "credentials": {
+        "openAiApi": { "id": "inhouse-llm", "name": "In-House LLM" }
+      }
     }
   ],
   "connections": {
     "When chat message received": {
+      "main": [[{ "node": "Route Classifier", "type": "main", "index": 0 }]]
+    },
+    "Route Classifier": {
+      "main": [[{ "node": "Parse Route", "type": "main", "index": 0 }]]
+    },
+    "Parse Route": {
+      "main": [[{ "node": "Route Switch", "type": "main", "index": 0 }]]
+    },
+    "Route Switch": {
       "main": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Postgres Lookup", "type": "main", "index": 0 }],
+        [{ "node": "Postgres Lookup", "type": "main", "index": 0 }],
+        [{ "node": "Chroma Docs Search", "type": "main", "index": 0 }],
+        [{ "node": "Chroma Reference Search", "type": "main", "index": 0 }],
+        [{ "node": "Generate Answer", "type": "main", "index": 0 }]
       ]
     },
-    "In-House LLM": {
-      "ai_languageModel": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "ai_languageModel",
-            "index": 0
-          }
-        ]
-      ]
+    "Postgres Lookup": {
+      "main": [[{ "node": "Generate Answer", "type": "main", "index": 0 }]]
     },
-    "postgres_lookup": {
-      "ai_tool": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "ai_tool",
-            "index": 0
-          }
-        ]
-      ]
+    "Chroma Docs Search": {
+      "main": [[{ "node": "Generate Answer", "type": "main", "index": 0 }]]
     },
-    "chroma_search": {
-      "ai_tool": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "ai_tool",
-            "index": 0
-          }
-        ]
-      ]
+    "Chroma Reference Search": {
+      "main": [[{ "node": "Generate Answer", "type": "main", "index": 0 }]]
     }
   },
   "pinData": {},
-  "meta": {
-    "templateCredsSetupCompleted": false,
-    "instanceId": "skeleton"
-  },
-  "versionId": "skeleton-v1",
-  "tags": [
-    {
-      "name": "contracts",
-      "id": "contracts"
-    },
-    {
-      "name": "ai-agent",
-      "id": "ai-agent"
-    }
-  ]
+  "meta": { "templateCredsSetupCompleted": false },
+  "tags": [{ "name": "pure-n8n" }, { "name": "contracts-router" }]
 }
