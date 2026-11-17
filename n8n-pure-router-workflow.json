@@ -1,0 +1,267 @@
+{
+  "name": "Pure n8n Router - Contracts (Postgres + Chroma)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "chat-trigger",
+      "name": "When chat message received",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "model": "={{ $env.ROUTER_MODEL || '/genai/Llama-4-Scout-17B' }}",
+        "options": {
+          "baseURL": "={{ $env.LLM_BASE_URL }}",
+          "temperature": 0
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a route classifier for a contracts research system.\n\nClassify the user question into exactly one of these routes:\n- postgres\n- chroma_docs\n- chroma_reference\n- hybrid\n\nRules:\n- postgres: user names a specific project, asks for latest modification, file links, date-filtered contracts, federal/IT work, or structured lookup.\n- chroma_docs: user gives a description, opportunity text, or asks for similar SOWs / past performance.\n- chroma_reference: user asks for general reference material or background.\n- hybrid: needs both structured data and semantic search.\n\nReply with ONLY the route name. No other text."
+            }
+          ]
+        }
+      },
+      "id": "route-classifier",
+      "name": "Route Classifier",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [420, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "inhouse-llm",
+          "name": "In-House OpenAI Compatible"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = $input.first().json.text || $input.first().json.message || $input.first().json.content || '';\nconst route = text.trim().toLowerCase().replace(/[^a-z_]/g, '');\nconst allowed = ['postgres', 'chroma_docs', 'chroma_reference', 'hybrid'];\nconst finalRoute = allowed.includes(route) ? route : 'hybrid';\nreturn [{ json: { route: finalRoute, original: text, chatInput: $('When chat message received').item.json.chatInput } }];"
+      },
+      "id": "parse-route",
+      "name": "Parse Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "postgres",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "postgres"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "chroma_docs",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "chroma_docs"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "chroma_reference",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "chroma_reference"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "hybrid",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "hybrid"
+            }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "id": "route-switch",
+      "name": "Route Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \"Project\", \"Project_ID__c\", \"Contract_Name\", \"name\", \"Title\", \"link\", \"LinkFilename\", \"Created\", \"Modified\", \"lastModifiedDateTime\"\nFROM contracts_dataset_meta_prepared\nWHERE \"Project\" ILIKE '%' || $1 || '%'\n   OR \"Contract_Name\" ILIKE '%' || $1 || '%'\n   OR \"Project_ID__c\" ILIKE '%' || $1 || '%'\nORDER BY \"Modified\" DESC NULLS LAST\nLIMIT 20;",
+        "options": {
+          "queryReplacement": "={{ $json.chatInput || '' }}"
+        }
+      },
+      "id": "postgres-lookup",
+      "name": "Postgres Lookup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 80],
+      "credentials": {
+        "postgres": {
+          "id": "contracts-postgres",
+          "name": "Contracts Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CHROMA_URL }}/api/v1/collections/IS_contracts_full_main_e5_documents/query",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ $env.CHROMA_AUTH_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query_texts\": [\"{{ $json.chatInput || '' }}\"],\n  \"n_results\": 10\n}"
+      },
+      "id": "chroma-docs",
+      "name": "Chroma Docs Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 240]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CHROMA_URL }}/api/v1/collections/IS_reference_main_e5/query",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "={{ $env.CHROMA_AUTH_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query_texts\": [\"{{ $json.chatInput || '' }}\"],\n  \"n_results\": 8\n}"
+      },
+      "id": "chroma-reference",
+      "name": "Chroma Reference Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "model": "={{ $env.ROUTER_MODEL || '/genai/Llama-4-Scout-17B' }}",
+        "options": {
+          "baseURL": "={{ $env.LLM_BASE_URL }}",
+          "temperature": 0.2
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a contracts research assistant. Using the retrieved data below, answer the user's question clearly and concisely. Include project names, dates, and file links when available. If results are weak, say so."
+            }
+          ]
+        }
+      },
+      "id": "generate-answer",
+      "name": "Generate Answer",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [1360, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "inhouse-llm",
+          "name": "In-House OpenAI Compatible"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1580, 300]
+    }
+  ],
+  "connections": {
+    "When chat message received": {
+      "main": [[{ "node": "Route Classifier", "type": "main", "index": 0 }]]
+    },
+    "Route Classifier": {
+      "main": [[{ "node": "Parse Route", "type": "main", "index": 0 }]]
+    },
+    "Parse Route": {
+      "main": [[{ "node": "Route Switch", "type": "main", "index": 0 }]]
+    },
+    "Route Switch": {
+      "main": [
+        [{ "node": "Postgres Lookup", "type": "main", "index": 0 }],
+        [{ "node": "Chroma Docs Search", "type": "main", "index": 0 }],
+        [{ "node": "Chroma Reference Search", "type": "main", "index": 0 }],
+        [{ "node": "Chroma Docs Search", "type": "main", "index": 0 }]
+      ]
+    },
+    "Postgres Lookup": {
+      "main": [[{ "node": "Generate Answer", "type": "main", "index": 0 }]]
+    },
+    "Chroma Docs Search": {
+      "main": [[{ "node": "Generate Answer", "type": "main", "index": 0 }]]
+    },
+    "Chroma Reference Search": {
+      "main": [[{ "node": "Generate Answer", "type": "main", "index": 0 }]]
+    },
+    "Generate Answer": {
+      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "pure-router-v1"
+  },
+  "versionId": "pure-router-v1",
+  "tags": [
+    { "name": "pure-n8n", "id": "pure-n8n" },
+    { "name": "router", "id": "router" },
+    { "name": "contracts", "id": "contracts" }
+  ]
+}
